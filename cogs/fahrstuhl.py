@@ -27,7 +27,8 @@ log = logging.getLogger(f'red.{module_id}')
 
 ServerId = str
 ChannelId = str
-AudioPlayer = Any # discord.ProcessPlayer
+AudioPlayer = Any  # discord.ProcessPlayer
+
 
 class Muzak:
     """Endless horror"""
@@ -62,9 +63,9 @@ class Muzak:
         """Plays a local tracks"""
         server: Optional[discord.Server] = ctx.message.server
         author: discord.User = ctx.message.author
-        channel: Union[discord.Channel,discord.PrivateChannel] = ctx.message.channel
+        channel: Union[discord.Channel, discord.PrivateChannel] = ctx.message.channel
 
-        if server is None: # i.e. channel.is_private
+        if server is None:  # i.e. channel.is_private
             await self.say('You need to say this in a channel.')
             return
 
@@ -113,7 +114,8 @@ class Muzak:
             raise UnauthorizedSpeak
 
         is_admin = perms.administrator
-        is_full = channel.user_limit != 0 and len(channel.voice_members) >= channel.user_limit
+        is_full = channel.user_limit != 0 and len(
+            channel.voice_members) >= channel.user_limit
         if is_full and not is_admin:
             raise ChannelUserLimit
 
@@ -248,7 +250,7 @@ class Muzak:
         server = channel.server
         if channel == self.joined_voice_channel(server):
             log.info(f'already joined {server.id}#{channel.id}')
-            return # already connected to this channel
+            return  # already connected to this channel
 
         self.check_can_join(channel)
 
@@ -290,7 +292,8 @@ class Muzak:
         # Member is the bot
 
         if before.voice_channel != after.voice_channel:
-            self.queues[after.server.id].voice_channel_id = after.voice_channel.id
+            self.queues[
+                after.server.id].voice_channel_id = after.voice_channel.id
 
         if before.mute != after.mute:
             player = self.audio_player(server)
@@ -338,7 +341,8 @@ class Muzak:
         return self is self.bot.get_cog('Muzak')
 
     async def local_tracks_autoupdater(self) -> None:
-        # we're lacking a good lib to watch for fs changes, so we'll have to do it ourselves
+        # we're lacking a good lib to watch for fs changes, so we'll have to do
+        # it ourselves
         while self.is_loaded():
             if 'local-tracks' in self.playlists:
                 playlist = self.playlists['local-tracks']
@@ -493,10 +497,14 @@ class ChannelUserLimit(Exception):
 class ConnectTimeout(NotConnected):
     pass
 
+
 QueueType = TypeVar('QueueType', bound='Queue')
+
+
 class Queue:
+
     def __init__(self, playlist: 'Playlist'=None, voice_channel_id: ChannelId=None,
-                       songs: Deque['Song']=None, now_playing: 'Song'=None) -> None:
+                 songs: Deque['Song']=None, now_playing: 'Song'=None) -> None:
         self.playlist = playlist
         self.voice_channel_id = voice_channel_id
         self.songs = songs or deque()
@@ -515,7 +523,8 @@ class Queue:
     def reload_from_playlist(self) -> None:
         if not self.playlist:
             return
-        self.songs = deque(Song.from_path(path) for path in self.playlist.available_files())
+        self.songs = deque(Song.from_path(path)
+                           for path in self.playlist.available_files())
 
     def playlist_name(self) -> Optional[str]:
         return self.playlist.name if self.playlist else None
@@ -529,8 +538,12 @@ class Queue:
         q.reload_from_playlist()
         return q
 
+
 SongType = TypeVar('SongType', bound='Song')
+
+
 class Song:
+
     def __init__(self, **kwargs: Any) -> None:
         self.__dict__ = kwargs
         self.title = kwargs.pop('title', None)
@@ -559,7 +572,9 @@ class Song:
     def from_path(Class: Type[SongType], path: Path) -> SongType:
         return Class(title=path.stem, path=path)
 
+
 class Playlist:
+
     def __init__(self, server: discord.Server=None, name: str=None,
                  author: str=None, url: str=None, files: Iterator[Path]=None,
                  path: Path=None, repeat: bool=False) -> None:
