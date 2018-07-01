@@ -353,7 +353,8 @@ def initialize(bot_class=Bot, formatter_class=Formatter):
         elif isinstance(error, commands.BadArgument):
             await bot.send_cmd_help(ctx)
         elif isinstance(error, commands.DisabledCommand):
-            await bot.send_message(channel, "That command is disabled.")
+            # await bot.send_message(channel, "That command is disabled.")
+            pass
         elif isinstance(error, commands.CommandInvokeError):
             # A bit hacky, couldn't find a better way
             no_dms = "Cannot send messages to this user"
