@@ -7,6 +7,7 @@ import asyncio
 import copy
 import datetime
 import logging
+import random
 import re
 import subprocess
 import time
@@ -123,8 +124,8 @@ class Muzak:
         playlist_name = 'local-tracks'
         if self.queues[server.id].playlist_name() == playlist_name:
             return
-        playlist = Playlist(name=playlist_name,
-                            files=self.local_tracks(), repeat=True)
+        playlist = Playlist(name=playlist_name, files=self.local_tracks(),
+                            repeat=True, shuffle=True)
         self.playlists[playlist_name] = playlist
         self.queue_playlist(server, playlist)
 
@@ -523,8 +524,11 @@ class Queue:
     def reload_from_playlist(self) -> None:
         if not self.playlist:
             return
-        self.songs = deque(Song.from_path(path)
-                           for path in self.playlist.available_files())
+        files = [Song.from_path(path)
+                 for path in self.playlist.available_files()]
+        if self.playlist.shuffle:
+            random.shuffle(files)
+        self.songs = deque(files)
 
     def playlist_name(self) -> Optional[str]:
         return self.playlist.name if self.playlist else None
@@ -577,7 +581,7 @@ class Playlist:
 
     def __init__(self, server: discord.Server=None, name: str=None,
                  author: str=None, url: str=None, files: Iterator[Path]=None,
-                 path: Path=None, repeat: bool=False) -> None:
+                 path: Path=None, repeat: bool=False, shuffle: bool=False) -> None:
         self.server = server
         self.name = name
         self.author = author
@@ -585,6 +589,7 @@ class Playlist:
         self.files: List[Path] = list(files) if files else []
         self.path = path
         self.repeat: bool = repeat
+        self.shuffle: bool = shuffle
 
     def available_files(self) -> Iterator[Path]:
         return (path for path in self.files if path.is_file())
