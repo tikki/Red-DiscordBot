@@ -1,7 +1,6 @@
 import asyncio
 import os
 import sys
-sys.path.insert(0, "lib")
 import logging
 import logging.handlers
 import traceback
@@ -182,41 +181,6 @@ class Bot(commands.Bot):
                     return False
 
         return True
-
-    async def pip_install(self, name, *, timeout=None):
-        """
-        Installs a pip package in the local 'lib' folder in a thread safe
-        way. On Mac systems the 'lib' folder is not used.
-        Can specify the max seconds to wait for the task to complete
-
-        Returns a bool indicating if the installation was successful
-        """
-
-        IS_MAC = sys.platform == "darwin"
-        interpreter = sys.executable
-
-        if interpreter is None:
-            raise RuntimeError("Couldn't find Python's interpreter")
-
-        args = [
-            interpreter, "-m",
-            "pip", "install",
-            "--upgrade",
-            "--target", "lib",
-            name
-        ]
-
-        if IS_MAC: # --target is a problem on Homebrew. See PR #552
-            args.remove("--target")
-            args.remove("lib")
-
-        def install():
-            code = subprocess.call(args)
-            sys.path_importer_cache = {}
-            return not bool(code)
-
-        response = self.loop.run_in_executor(None, install)
-        return await asyncio.wait_for(response, timeout=timeout)
 
 
 class Formatter(commands.HelpFormatter):
@@ -474,7 +438,7 @@ def set_logger(bot):
     red_format = logging.Formatter(
         '%(asctime)s %(levelname)s %(module)s %(funcName)s %(lineno)d: '
         '%(message)s',
-        datefmt="[%d/%m/%Y %H:%M]")
+        datefmt="[%d/%m/%Y %H:%M:%S]")
 
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setFormatter(red_format)

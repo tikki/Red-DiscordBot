@@ -2,7 +2,7 @@ from collections import deque, defaultdict
 from contextlib import suppress
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Iterator, Deque, Type, TypeVar, cast, Union
+from typing import *
 import asyncio
 import copy
 import datetime
@@ -11,8 +11,8 @@ import random
 import re
 import subprocess
 import time
+import uuid
 
-from __main__ import send_cmd_help, settings
 from cogs.utils import checks
 from cogs.utils.chat_formatting import pagify, escape
 from cogs.utils.dataIO import dataIO
@@ -23,12 +23,27 @@ __author__ = "tikki"
 __version__ = "1.0.0"
 
 
-module_id = 'fahrstuhl'
+module_id = 'betteraudio'
 log = logging.getLogger(f'red.{module_id}')
 
+SongId = str
 ServerId = str
 ChannelId = str
 AudioPlayer = Any  # discord.ProcessPlayer
+
+
+MuzakCoro = Callable[['Muzak'], Coroutine[None, None, None]]
+
+
+_while_loaded_tasks = []
+def while_loaded(func: MuzakCoro) -> MuzakCoro:
+    global _while_loaded_tasks
+    async def wrapper(self: 'Muzak') -> None:
+        while self.is_loaded():
+            await func(self)
+            await asyncio.sleep(1)
+    _while_loaded_tasks.append(wrapper)
+    return wrapper
 
 
 class Muzak:
@@ -37,31 +52,31 @@ class Muzak:
     def __init__(self, bot: commands.Bot, player: str) -> None:
         self.bot = bot
         self.queues: Dict[ServerId, Queue] = defaultdict(Queue)
-        self.play_logs: Dict[ServerId, deque] = defaultdict(deque)
+        # self.play_logs: Dict[ServerId, deque] = defaultdict(deque)
         self.settings = load_settings()
         self.server_specific_setting_keys = 'volume',
-        self.local_tracks_path = data_path() / 'tracks'
         self.players: Dict[ServerId, AudioPlayer] = {}
-        self.playlists: Dict[ServerId, Playlist] = {}
+        self.playlists: Dict[ServerId, BasePlaylist] = {}
 
-        self.skip_votes: Dict[ServerId, List] = {}
+        self.no_listeners_timeouts: Dict[ServerId, float] = {}
 
-        self.connect_timers: Dict[ServerId, int] = {}
+        # self.skip_votes: Dict[ServerId, List] = {}
+
+        self.connect_timers: Dict[ServerId, float] = defaultdict(time.time)
 
         self.settings['use_avconv'] = player == 'avconv'
-        self.save_settings()
 
-        bot.loop.create_task(self.queue_scheduler())
-        bot.loop.create_task(self.local_tracks_autoupdater())
-        bot.loop.create_task(self.cleanup_on_unload())
+        for task in _while_loaded_tasks:
+            bot.loop.create_task(task(self))
 
     def save_settings(self) -> None:
         save_settings(self.settings)
 
-    @commands.command(name="fahrstuhl", hidden=True, pass_context=True, no_pm=True)
+    @no_type_check
+    @commands.command(name="zak", hidden=True, pass_context=True, no_pm=True)
     @checks.is_owner()
-    async def command_play(self, ctx: commands.Context) -> None:
-        """Plays a local tracks"""
+    async def command_play(self, ctx: commands.Context, playlist_name: str) -> None:
+        """Play a playlist"""
         server: Optional[discord.Server] = ctx.message.server
         author: discord.User = ctx.message.author
         channel: Union[discord.Channel, discord.PrivateChannel] = ctx.message.channel
@@ -74,7 +89,9 @@ class Muzak:
             await self.say('You need to be in a voice channel.')
             return
 
-        if self.is_playing(server, author.voice_channel):
+        if (self.is_playing(server, author.voice_channel) and
+                server.id in self.playlists and
+                self.playlists[server.id].name == playlist_name):
             await self.say("Turn up your volume, I'm already playing!")
             return
 
@@ -90,7 +107,7 @@ class Muzak:
             await self.say('Your voice channel is full.')
             return
 
-        self.play_local_tracks(server)
+        self.play_playlist(server, playlist_name)
 
     async def say(self, what: str) -> None:
         await self.bot.say(what)
@@ -120,30 +137,20 @@ class Muzak:
         if is_full and not is_admin:
             raise ChannelUserLimit
 
-    def play_local_tracks(self, server: discord.Server) -> None:
-        playlist_name = 'local-tracks'
+    def play_playlist(self, server: discord.Server, playlist_name: str) -> None:
         if self.queues[server.id].playlist_name() == playlist_name:
             return
-        playlist = Playlist(name=playlist_name, files=self.local_tracks(),
-                            repeat=True, shuffle=True)
-        self.playlists[playlist_name] = playlist
-        self.queue_playlist(server, playlist)
-
-    def local_tracks(self) -> Iterator[Path]:
-        return self.local_tracks_path.iterdir()
-
-    def queue_playlist(self, server: discord.Server, playlist: 'Playlist') -> None:
-        log.debug(f'setting up playlist {playlist.name} on sid {server.id}')
-
-        self.stop_player(server)
-
-        log.debug(f'finished resetting state on sid {server.id}')
-
+        log.debug(f'loading playlist {playlist_name} '
+                  f'into queue on server {server.name}')
+        playlist = FancyPlaylist.with_name(playlist_name)
         self.queues[server.id] = Queue.from_playlist(playlist)
+        self.playlists[server.id] = playlist
+        self.stop_player(server)
 
     def stop_player(self, server: discord.Server) -> None:
         player = self.audio_player(server)
         if player:
+            log.debug(f'stopping player on server {server.name}')
             player.stop()
 
     def voice_client(self, server: discord.Server) -> Optional[discord.VoiceClient]:
@@ -155,7 +162,15 @@ class Muzak:
     def is_voice_connected(self, server: discord.Server) -> bool:
         return self.bot.is_voice_connected(server)
 
-    def is_playing(self, server: discord.Server, channel: discord.Channel=None) -> bool:
+    def is_playing(self, server: discord.Server,
+                         channel: discord.Channel=None) -> bool:
+        '''Return if we should be playing at the moment.
+
+        Even if this function returns true, that does not mean we are actually
+        sending audio out into the world! A player can be paused (e.g. because
+        the bot was muted or all listeners left the channel) and this will still
+        return true.
+        '''
         player = self.audio_player(server)
         is_playing_on_server = player is not None and not player.is_done()
         if channel is None:
@@ -170,7 +185,6 @@ class Muzak:
         for key in self.server_specific_setting_keys:
             if key not in settings:
                 settings[key] = self.settings[key]
-        # self.save_settings()
 
         return settings
 
@@ -184,20 +198,17 @@ class Muzak:
         #     return voice_client.channel
 
     async def play(self, server: discord.Server, song: 'Song') -> None:
-        """Returns the song object of what's playing"""
-        assert type(server) is discord.Server
-        log.debug(f'starting to play on "{server.name}"')
-
-        if not song.path or not song.is_playable():
-            raise FileNotFoundError
+        if not song.is_playable():
+            log.debug(f'song is not playable: {song}')
+            raise SongNotPlayable
 
         player = await self.create_audio_player(server, song.path,
                                                 start_time=song.start_time,
                                                 end_time=song.end_time)
         player.start()
-        play_start_time = datetime.datetime.now()
-        self.play_logs[server.id].append((play_start_time, song))
-        log.debug(f'starting player on sid {server.id}')
+        # play_start_time = datetime.datetime.now()
+        # self.play_logs[server.id].append((play_start_time, song))
+        log.debug(f'playing on server {server.name}: {song}')
 
     async def create_audio_player(self, server: discord.Server, filepath: Path,
                                   start_time: str=None, end_time: str=None) -> AudioPlayer:
@@ -250,7 +261,7 @@ class Muzak:
     async def join_voice_channel(self, channel: discord.Channel, switch: bool=True) -> discord.VoiceClient:
         server = channel.server
         if channel == self.joined_voice_channel(server):
-            log.info(f'already joined {server.id}#{channel.id}')
+            log.debug(f'already joined {server.name}#{channel.id}')
             return  # already connected to this channel
 
         self.check_can_join(channel)
@@ -261,7 +272,7 @@ class Muzak:
                 await voice_client.move_to(channel)
                 return voice_client
 
-        connect_time = self.connect_timers.get(server.id, 0)
+        connect_time = self.connect_timers[server.id]
         if time.time() < connect_time:
             diff = int(connect_time - time.time())
             raise ConnectTimeout(f'You are on connect cooldown for another {diff} seconds.')
@@ -272,106 +283,124 @@ class Muzak:
                                    timeout=30, loop=self.bot.loop)
         except asyncio.futures.TimeoutError as e:
             log.exception(str(e))
-            self.connect_timers[server.id] = int(time.time()) + 300
+            self.connect_timers[server.id] = time.time() + 300
             raise ConnectTimeout("We timed out connecting to a voice channel,"
                                  " please try again in 10 minutes.")
         return self.voice_client(server)
 
-    async def on_voice_state_update(self, before: discord.Member, after: discord.Member) -> None:
-        server = after.server
-        # Member objects
-        if after.voice_channel != before.voice_channel:
-            with suppress(ValueError, KeyError):
-                self.skip_votes[server.id].remove(after.id)
-        if after is None:
+    def is_alone(self, server: discord.Server) -> bool:
+        '''Return wether the bot is alone in a voice channel'''
+        channel = self.joined_voice_channel(server)
+        return channel and len(channel.voice_members) == 1
+
+    async def on_voice_state_update(self, before: Optional[discord.Member],
+                                    after: Optional[discord.Member]) -> None:
+        '''Called whenever any user's voice state changes, not only our own.'''
+        if before is None or after is None:
             return
+
+        server = after.server
+
+        if server is None:
+            return
+
+        is_self = after == server.me
+
+        # if after.voice_channel != before.voice_channel:
+        #     with suppress(ValueError, KeyError):
+        #         self.skip_votes[server.id].remove(after.id)
         if server.id not in self.queues:
             return
-        if after != server.me:
-            return
 
-        # Member is the bot
+        player = self.audio_player(server)
+        is_resumable = (not server.me.mute and
+                        not player.is_playing() and not player.is_done())
 
-        if before.voice_channel != after.voice_channel:
-            self.queues[
-                after.server.id].voice_channel_id = after.voice_channel.id
-
-        if before.mute != after.mute:
-            player = self.audio_player(server)
-            if not player:
-                return
-            if after.mute and player.is_playing():
-                log.debug("Just got muted, pausing")
+        if player:
+            is_bot_alone = self.is_alone(server)
+            if is_bot_alone and player.is_playing():
+                log.debug('All listeners left, pausing')
                 player.pause()
-            elif not after.mute and \
-                    (not player.is_playing() and
-                     not player.is_done()):
-                log.debug("just got unmuted, resuming")
+                self.no_listeners_timeouts[server.id] = time.time()
+            elif not is_bot_alone and is_resumable:
+                log.debug('Listeners available, resuming')
+                player.resume()
+                del self.no_listeners_timeouts[server.id]
+
+        if is_self and before.voice_channel != after.voice_channel:
+            self.queues[server.id].voice_channel_id = after.voice_channel.id
+
+        if is_self and before.mute != after.mute:
+            if after.mute and player.is_playing():
+                log.debug('Just got muted, pausing')
+                player.pause()
+            elif is_resumable:
+                log.debug('just got unmuted, resuming')
                 player.resume()
 
     async def play_next_song_in_queue(self, server_id: ServerId) -> None:
         server = self.server(server_id)
 
         if not server:
+            log.debug(f'could not find server for sid {server_id}')
             return
 
         if self.is_playing(server):
             return
 
+        if self.is_alone(server):
+            return
+
+        log.debug(f'not playing anything on server {server.name},'
+                   ' attempting to start a new song.')
+
         queue = self.queues[server.id]
 
-        should_reload = queue.playlist and queue.playlist.repeat
-        if queue.is_empty() and should_reload:
-            queue.reload_from_playlist()
+        if queue.is_empty():
+            log.debug(f'refreshing queue from attached playlist')
+            queue.refresh()
 
         song = queue.next_song()
         if song is None:
             log.debug('No more songs to play.')
             return
 
-        log.debug(f'not playing anything on sid {server.id},'
-                   ' attempting to start a new song.')
-        self.skip_votes[server.id] = []
-        # Reset skip votes for each new song
-
         await self.play(server, song)
         self.queues[server.id].now_playing = song
-        log.debug(f'set now_playing for sid {server.id}')
+        # self.skip_votes[server.id] = []
 
     def is_loaded(self) -> bool:
-        return self is self.bot.get_cog('Muzak')
+        return self is self.bot.get_cog(self.__class__.__name__)
 
-    async def local_tracks_autoupdater(self) -> None:
-        # we're lacking a good lib to watch for fs changes, so we'll have to do
-        # it ourselves
-        while self.is_loaded():
-            if 'local-tracks' in self.playlists:
-                playlist = self.playlists['local-tracks']
-                playlist.files = list(self.local_tracks())
-            await asyncio.sleep(30)
+    @while_loaded
+    async def clear_queue_on_pause_timeout(self) -> None:
+        for server in (self.server(server_id) for server_id in self.queues):
+            if not server or server.id not in self.no_listeners_timeouts:
+                continue
+            spent = time.time() - self.no_listeners_timeouts[server.id]
+            if spent > self.settings['skip_group_timeout']:
+                log.debug('no listeners timeout: '
+                          f'clearing queue on server {server.name}')
+                self.stop_player(server)
+                self.queues[server.id].clear()
+                del self.no_listeners_timeouts[server.id]
 
+    @while_loaded
     async def queue_scheduler(self) -> None:
-        while self.is_loaded():
-            tasks = []
-            queues = copy.deepcopy(self.queues)
-            for server_id in queues:
-                tasks.append(
-                    self.bot.loop.create_task(self.play_next_song_in_queue(server_id)))
-            while not all(t.done() for t in tasks):
-                await asyncio.sleep(0.5)
-            await asyncio.sleep(1)
-
-    async def cleanup_on_unload(self) -> None:
-        while self.is_loaded():
+        # queues = copy.deepcopy(self.queues)
+        task = self.bot.loop.create_task
+        tasks = (task(self.play_next_song_in_queue(server_id))
+                 for server_id in self.queues)
+        while not all(t.done() for t in tasks):
             await asyncio.sleep(0.5)
-
-        for player in self.players.values():
-            with suppress(BaseException):
-                player.stop()
 
     def __unload(self) -> None:
         for vc in self.bot.voice_clients:
             self.bot.loop.create_task(vc.disconnect())
+        for player in self.players.values():
+            with suppress(BaseException):
+                player.stop()
+        self.save_settings()
 
 
 def setup(bot: commands.Bot) -> None:
@@ -430,7 +459,8 @@ def check_folders() -> None:
 
 
 def default_config() -> dict:
-    return {'volume': 100, 'servers': {}, 'vote_threshold': 50}
+    return {'volume': 100, 'servers': {}, 'vote_threshold': 50,
+            'skip_group_timeout': 30}
 
 
 def load_settings() -> dict:
@@ -471,6 +501,10 @@ class VoiceNotConnected(NotConnected):
     pass
 
 
+class SongNotPlayable(Exception):
+    pass
+
+
 class PrivateChannel(Exception):
     pass
 
@@ -499,12 +533,9 @@ class ConnectTimeout(NotConnected):
     pass
 
 
-QueueType = TypeVar('QueueType', bound='Queue')
-
-
 class Queue:
 
-    def __init__(self, playlist: 'Playlist'=None, voice_channel_id: ChannelId=None,
+    def __init__(self, playlist: 'BasePlaylist'=None, voice_channel_id: ChannelId=None,
                  songs: Deque['Song']=None, now_playing: 'Song'=None) -> None:
         self.playlist = playlist
         self.voice_channel_id = voice_channel_id
@@ -521,14 +552,10 @@ class Queue:
                 return song
         return None
 
-    def reload_from_playlist(self) -> None:
+    def refresh(self) -> None:
         if not self.playlist:
             return
-        files = [Song.from_path(path)
-                 for path in self.playlist.available_files()]
-        if self.playlist.shuffle:
-            random.shuffle(files)
-        self.songs = deque(files)
+        self.songs = deque(self.playlist.next_songs())
 
     def playlist_name(self) -> Optional[str]:
         return self.playlist.name if self.playlist else None
@@ -537,19 +564,17 @@ class Queue:
         return len(self.songs) == 0
 
     @classmethod
-    def from_playlist(Class: Type[QueueType], playlist: 'Playlist') -> QueueType:
+    def from_playlist(Class, playlist: 'BasePlaylist') -> 'Queue':
         q = Class(playlist=playlist)
-        q.reload_from_playlist()
+        q.refresh()
         return q
-
-
-SongType = TypeVar('SongType', bound='Song')
 
 
 class Song:
 
     def __init__(self, **kwargs: Any) -> None:
         self.__dict__ = kwargs
+        self._id: SongId = kwargs.pop('id', None)
         self.title = kwargs.pop('title', None)
         self.url = cast(Optional[str], kwargs.pop('url', None))
         self.path = cast(Optional[Path], kwargs.pop('path', None))
@@ -559,12 +584,11 @@ class Song:
         self.end_time = kwargs.pop('end_time', None)
 
     @property
-    def id(self) -> str:
-        if self.url:
-            return self.url
-        if self.path:
-            return self.path.resolve().as_uri()
-        return ''
+    def id(self) -> SongId:
+        if not self._id:
+            self._id = self.url or (self.path.resolve().as_uri()
+                                    if self.path else uuid.uuid4().hex)
+        return self._id
 
     def duration_delta(self) -> datetime.timedelta:
         return datetime.timedelta(seconds=self.duration)
@@ -573,33 +597,119 @@ class Song:
         return self.path is not None and self.path.is_file()
 
     @classmethod
-    def from_path(Class: Type[SongType], path: Path) -> SongType:
+    def from_path(Class, path: Path) -> 'Song':
         return Class(title=path.stem, path=path)
 
+    def __repr__(self) -> str:
+        return str(self.path)
+        return f'Song({ dict(path=self.path) })'
 
-class Playlist:
 
-    def __init__(self, server: discord.Server=None, name: str=None,
-                 author: str=None, url: str=None, files: Iterator[Path]=None,
-                 path: Path=None, repeat: bool=False, shuffle: bool=False) -> None:
-        self.server = server
+class BasePlaylist:
+    def __init__(self, name: str=None) -> None:
         self.name = name
-        self.author = author
-        self.url = url
-        self.files: List[Path] = list(files) if files else []
+
+    def next_songs(self) -> Iterable[Song]:
+        raise NotImplementedError
+
+
+class Playlist(BasePlaylist):
+
+    def __init__(self, name: str=None, files: Iterable[Path]=None,
+                 path: Path=None, repeat: bool=False, shuffle: bool=False) -> None:
+        super().__init__(name=name)
+        self.files = files
         self.path = path
-        self.repeat: bool = repeat
-        self.shuffle: bool = shuffle
+        self.repeat = repeat
+        self.shuffle = shuffle
 
-    def available_files(self) -> Iterator[Path]:
-        return (path for path in self.files if path.is_file())
+    def next_songs(self) -> Iterable[Song]:
+        if self.files is None:
+            return []
+        return (Song.from_path(path) for path in self.files if path.is_file())
 
-    def to_json(self) -> Dict[str, Any]:
-        return {'author': self.author, 'files': self.files,
-                'url': self.url, 'name': self.name}
-
-    def is_author(self, user: discord.User) -> bool:
-        return user.id == self.author
+    def settings(self) -> Dict[str, Any]:
+        return {'files': self.files, 'name': self.name,
+                'repeat': self.repeat, 'shuffle': self.shuffle}
 
     def save(self) -> None:
-        dataIO.save_json(self.path, self.to_json())
+        if not self.path:
+            raise RuntimeError('Playlist has no path.')
+        dataIO.save_json(self.path, self.settings())
+
+
+class FancyPlaylist(BasePlaylist):
+
+    def __init__(self, groups_dir: str, group_order: str=None,
+                 group_pattern: str='', song_order: str=None,
+                 song_pattern: str='', name: str=None, repeat: bool=False) -> None:
+        super().__init__(name=name)
+        self._groups: Iterable[Path] = None
+        self.group_order = group_order
+        self.group_pattern = re.compile(group_pattern)
+        self.groups_dir = Path(groups_dir)
+        self.song_order = song_order
+        self.song_pattern = re.compile(song_pattern)
+        self.repeat = repeat
+
+    def next_songs(self) -> Iterable[Song]:
+        while True:
+            is_fresh = False
+            if self._groups is None:
+                self._groups = self._find_groups()
+                is_fresh = True
+            for group in self._groups:
+                log.debug(f'checking group "{group!s}"')
+                for song_path in self._find_songs(group):
+                    log.debug(f'found song "{song_path!s}"')
+                    yield Song.from_path(song_path)
+                return
+            else: # no more groups left
+                if not self.repeat:
+                    return
+                self._groups = None # set up reload
+                if is_fresh: # just reloaded & already exhausted
+                    return
+
+    @classmethod
+    def with_name(Class, name: str) -> 'FancyPlaylist':
+        settings = dataIO.load_json(Class.path(name))
+        return Class(name=name, **settings)
+
+    @staticmethod
+    def path(name: str) -> Path:
+        if not name:
+            raise RuntimeError('Playlist has no name.')
+        # todo: sanitize playlist name
+        return data_path() / 'playlists' / f'{name}.playlist.json'
+
+    def settings(self) -> Dict[str, Any]:
+        return {'name': self.name, 'group_order': self.group_order,
+                'group_pattern': self.group_pattern,
+                'groups_dir': self.groups_dir, 'song_order': self.song_order,
+                'song_pattern': self.song_pattern, 'repeat': self.repeat}
+
+    def save(self) -> None:
+        dataIO.save_json(self.path(self.name), self.settings())
+
+    def _rejigger(self, name: str) -> Callable[[Iterable], Iterable]:
+        rejiggers = {'sort': sorted, 'shuffle': shuffled}
+        return rejiggers.get(name, lambda x: x)
+
+    def _find_groups(self) -> Iterable[Path]:
+        groups = (group for group in self.groups_dir.iterdir()
+                  if group.is_dir() and self.group_pattern.search(group.as_posix()))
+        rejiggered = self._rejigger(self.group_order)
+        yield from rejiggered(groups)
+
+    def _find_songs(self, group: Path) -> Iterable[Path]:
+        songs = (song for song in group.iterdir()
+                 if song.is_file() and self.song_pattern.search(song.as_posix()))
+        rejiggered = self._rejigger(self.song_order)
+        yield from rejiggered(songs)
+
+
+def shuffled(iter: Iterable) -> Iterable:
+    items = list(iter)
+    while items:
+        yield items.pop(random.randrange(len(items)))
