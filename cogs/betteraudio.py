@@ -640,15 +640,17 @@ class Playlist(BasePlaylist):
 
 class FancyPlaylist(BasePlaylist):
 
-    def __init__(self, groups_dir: str, group_order: str=None,
-                 group_pattern: str='', song_order: str=None,
+    def __init__(self, groups_dir: str, group_order: str=None, group_glob: str='*',
+                 group_pattern: str='', song_order: str=None, song_glob: str='*',
                  song_pattern: str='', name: str=None, repeat: bool=False) -> None:
         super().__init__(name=name)
         self._groups: Iterable[Path] = None
         self.group_order = group_order
+        self.group_glob = group_glob
         self.group_pattern = re.compile(group_pattern)
         self.groups_dir = Path(groups_dir)
         self.song_order = song_order
+        self.song_glob = song_glob
         self.song_pattern = re.compile(song_pattern)
         self.repeat = repeat
 
@@ -685,6 +687,7 @@ class FancyPlaylist(BasePlaylist):
 
     def settings(self) -> Dict[str, Any]:
         return {'name': self.name, 'group_order': self.group_order,
+                'group_glob': self.group_glob, 'song_glob': self.song_glob,
                 'group_pattern': self.group_pattern,
                 'groups_dir': self.groups_dir, 'song_order': self.song_order,
                 'song_pattern': self.song_pattern, 'repeat': self.repeat}
@@ -697,13 +700,13 @@ class FancyPlaylist(BasePlaylist):
         return rejiggers.get(name, lambda x: x)
 
     def _find_groups(self) -> Iterable[Path]:
-        groups = (group for group in self.groups_dir.iterdir()
+        groups = (group for group in self.groups_dir.glob(self.group_glob)
                   if group.is_dir() and self.group_pattern.search(group.as_posix()))
         rejiggered = self._rejigger(self.group_order)
         yield from rejiggered(groups)
 
     def _find_songs(self, group: Path) -> Iterable[Path]:
-        songs = (song for song in group.iterdir()
+        songs = (song for song in group.glob(self.song_glob)
                  if song.is_file() and self.song_pattern.search(song.as_posix()))
         rejiggered = self._rejigger(self.song_order)
         yield from rejiggered(songs)
