@@ -657,12 +657,20 @@ class Metadata:
     @classmethod
     def from_path(Class, path: Path) -> 'Metadata':
         self = Class()
-        tags = mutagen.File(path).tags
+        mfile = mutagen.File(path)
+        if not mfile:
+            self._with_defaults()
+            return self
+        tags = mfile.tags
         if isinstance(tags, mutagen.id3.ID3):
             self._with_mp3_tags(tags)
         else:
             self._with_other_tags(tags)
         return self
+
+    def _with_defaults(self) -> None:
+        for name in self.__slots__:
+            setattr(self, name, '')
 
     def _with_other_tags(self, tags: mutagen.Tags) -> None:
         for name in self.__slots__:
