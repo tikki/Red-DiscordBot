@@ -19,6 +19,7 @@ from cogs.utils.dataIO import dataIO
 from discord.ext import commands
 import discord
 import mutagen
+import mutagen.id3
 
 __author__ = "tikki"
 __version__ = "1.0.0"
