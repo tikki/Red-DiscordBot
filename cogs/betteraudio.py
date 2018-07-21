@@ -74,7 +74,15 @@ class Muzak:
         save_settings(self.settings)
 
     @no_type_check
-    @commands.command(name="zak", hidden=True, pass_context=True, no_pm=True)
+    @commands.group(pass_context=True)
+    async def zak(self, ctx):
+        """Play some muzak"""
+        if ctx.invoked_subcommand is None:
+            await self.bot.send_cmd_help(ctx)
+            return
+
+    @no_type_check
+    @zak.command(name="play", pass_context=True, no_pm=True)
     @checks.is_owner()
     async def command_play(self, ctx: commands.Context, playlist_name: str) -> None:
         """Play a playlist"""
@@ -111,9 +119,9 @@ class Muzak:
         self.play_playlist(server, playlist_name)
 
     @no_type_check
-    @commands.command(name="i", hidden=True, pass_context=True, no_pm=True)
-    @checks.is_owner()
+    @zak.command(name="now?", pass_context=True, no_pm=True)
     async def command_whats_playing(self, ctx: commands.Context) -> None:
+        """Show what's playing"""
         server: Optional[discord.Server] = ctx.message.server
         author: discord.User = ctx.message.author
         channel: Union[discord.Channel, discord.PrivateChannel] = ctx.message.channel
@@ -128,6 +136,43 @@ class Muzak:
             return
 
         await self.say(now_playing.metadata())
+
+    @no_type_check
+    @zak.group(name="next", pass_context=True, no_pm=True)
+    @checks.is_owner()
+    async def command_play_next(self, ctx: commands.Context) -> None:
+        """Skip a song or group"""
+        if self.command_play_next is ctx.invoked_subcommand:
+            await self.bot.send_cmd_help(ctx)
+            return
+
+    @no_type_check
+    @command_play_next.command(name="song", pass_context=True, no_pm=True)
+    async def command_play_next_song(self, ctx: commands.Context) -> None:
+        server: Optional[discord.Server] = ctx.message.server
+        author: discord.User = ctx.message.author
+        channel: Union[discord.Channel, discord.PrivateChannel] = ctx.message.channel
+
+        if (server.id not in self.queues or
+                self.queues[server.id].now_playing is None):
+            await self.say("I'm not playing anything at the moment.")
+            return
+
+        self.skip_current_song(server)
+
+    @no_type_check
+    @command_play_next.command(name="group", pass_context=True, no_pm=True)
+    async def command_play_next_group(self, ctx: commands.Context) -> None:
+        server: Optional[discord.Server] = ctx.message.server
+        author: discord.User = ctx.message.author
+        channel: Union[discord.Channel, discord.PrivateChannel] = ctx.message.channel
+
+        if (server.id not in self.queues or
+                self.queues[server.id].now_playing is None):
+            await self.say("I'm not playing anything at the moment.")
+            return
+
+        self.skip_current_group(server)
 
     async def say(self, what: str) -> None:
         await self.bot.say(what)
@@ -390,6 +435,14 @@ class Muzak:
         self.queues[server.id].now_playing = song
         # self.skip_votes[server.id] = []
 
+    def skip_current_song(self, server: discord.Server) -> None:
+        self.stop_player(server)
+
+    def skip_current_group(self, server: discord.Server) -> None:
+        if server.id in self.queues:
+            self.queues[server.id].clear()
+        self.stop_player(server)
+
     def is_loaded(self) -> bool:
         return self is self.bot.get_cog(self.__class__.__name__)
 
@@ -402,8 +455,7 @@ class Muzak:
             if spent > self.settings['skip_group_timeout']:
                 log.debug('no listeners timeout: '
                           f'clearing queue on server {server.name}')
-                self.stop_player(server)
-                self.queues[server.id].clear()
+                self.skip_current_group(server)
                 del self.no_listeners_timeouts[server.id]
 
     @while_loaded
