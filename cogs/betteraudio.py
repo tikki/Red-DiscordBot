@@ -18,6 +18,7 @@ from cogs.utils.chat_formatting import pagify, escape
 from cogs.utils.dataIO import dataIO
 from discord.ext import commands
 import discord
+import mutagen
 
 __author__ = "tikki"
 __version__ = "1.0.0"
@@ -108,6 +109,25 @@ class Muzak:
             return
 
         self.play_playlist(server, playlist_name)
+
+    @no_type_check
+    @commands.command(name="i", hidden=True, pass_context=True, no_pm=True)
+    @checks.is_owner()
+    async def command_whats_playing(self, ctx: commands.Context) -> None:
+        server: Optional[discord.Server] = ctx.message.server
+        author: discord.User = ctx.message.author
+        channel: Union[discord.Channel, discord.PrivateChannel] = ctx.message.channel
+
+        if server.id not in self.queues:
+            await self.say("I can't remember what I last played, sorry.")
+            return
+
+        now_playing = self.queues[server.id].now_playing
+        if not now_playing:
+            await self.say("I'm not playing anything at the moment.")
+            return
+
+        await self.say(now_playing.metadata())
 
     async def say(self, what: str) -> None:
         await self.bot.say(what)
@@ -208,7 +228,8 @@ class Muzak:
         player.start()
         # play_start_time = datetime.datetime.now()
         # self.play_logs[server.id].append((play_start_time, song))
-        log.debug(f'playing on server {server.name}: {song}')
+        log.debug(f'playing on server {server.name}: {song} '
+                  f'({song.metadata()})')
 
     async def create_audio_player(self, server: discord.Server, filepath: Path,
                                   start_time: str=None, end_time: str=None) -> AudioPlayer:
@@ -570,11 +591,73 @@ class Queue:
         return q
 
 
+class Metadata:
+    album: str
+    albumartist: str
+    artist: str
+    title: str
+    tracknumber: str
+    tracktotal: str
+    year: str
+    __slots__ = ('album', 'albumartist', 'artist', 'title',
+                 'tracknumber', 'tracktotal', 'year')
+
+    @classmethod
+    def from_path(Class, path: Path) -> 'Metadata':
+        self = Class()
+        tags = mutagen.File(path).tags
+        if isinstance(tags, mutagen.id3.ID3):
+            self._with_mp3_tags(tags)
+        else:
+            self._with_other_tags(tags)
+        return self
+
+    def _with_other_tags(self, tags: mutagen.Tags) -> None:
+        for name in self.__slots__:
+            values = tags.get(name, [''])
+            setattr(self, name, values[0])
+        if 'date' in tags:
+            self.year = tags['date'][0]
+
+    def _with_mp3_tags(self, tags: mutagen.id3.ID3) -> None:
+        attrmap = {
+            'album': 'TALB',
+            'artist': 'TPE1',
+            'title': 'TIT2',
+            # 'tracknumber': 'TRCK',
+            'year': 'TYER',
+            # 'year': 'TDRC',
+        }
+        for name in self.__slots__:
+            tag = tags.get(attrmap.get(name), '')
+            setattr(self, name, str(tag))
+        if not self.year and 'TDRC' in tags:
+            self.year = str(tags['TDRC'])
+        if 'TRCK' in tags:
+            tag = str(tags['TRCK'])
+            if '/' in tag:
+                self.tracknumber, self.tracktotal = tag.split('/', 1)
+            else:
+                self.tracknumber = tag
+
+    def __str__(self) -> str:
+        s = f'"{self.artist or "{anonymous}"}" — "{self.title or "{untitled}"}"'
+        if self.album:
+            s += f' ({self.album})'
+        if self.year:
+            s += f' ({self.year})'
+        return s
+
+    def __repr__(self) -> str:
+        return f'Metadata({ {k: getattr(self, k) for k in self.__slots__} })'
+
+
 class Song:
 
     def __init__(self, **kwargs: Any) -> None:
         self.__dict__ = kwargs
         self._id: SongId = kwargs.pop('id', None)
+        self._meta: Metadata = None
         self.title = kwargs.pop('title', None)
         self.url = cast(Optional[str], kwargs.pop('url', None))
         self.path = cast(Optional[Path], kwargs.pop('path', None))
@@ -599,6 +682,11 @@ class Song:
     @classmethod
     def from_path(Class, path: Path) -> 'Song':
         return Class(title=path.stem, path=path)
+
+    def metadata(self) -> Metadata:
+        if not self._meta:
+            self._meta = Metadata.from_path(self.path)
+        return self._meta
 
     def __repr__(self) -> str:
         return str(self.path)
