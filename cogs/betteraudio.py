@@ -154,9 +154,13 @@ class Muzak:
         author: discord.User = ctx.message.author
         channel: Union[discord.Channel, discord.PrivateChannel] = ctx.message.channel
 
-        if (server.id not in self.queues or
-                self.queues[server.id].now_playing is None):
+        if not self.is_playing(server):
             await self.say("I'm not playing anything at the moment.")
+            return
+
+        if (not author.voice_channel or
+                not self.is_playing(server, author.voice_channel)):
+            await self.say('You need to be in the voice channel with me.')
             return
 
         self.skip_current_song(server)
@@ -168,9 +172,13 @@ class Muzak:
         author: discord.User = ctx.message.author
         channel: Union[discord.Channel, discord.PrivateChannel] = ctx.message.channel
 
-        if (server.id not in self.queues or
-                self.queues[server.id].now_playing is None):
+        if not self.is_playing(server):
             await self.say("I'm not playing anything at the moment.")
+            return
+
+        if (not author.voice_channel or
+                not self.is_playing(server, author.voice_channel)):
+            await self.say('You need to be in the voice channel with me.')
             return
 
         self.skip_current_group(server)
