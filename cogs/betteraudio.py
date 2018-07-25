@@ -470,8 +470,8 @@ class Muzak:
     async def queue_scheduler(self) -> None:
         # queues = copy.deepcopy(self.queues)
         task = self.bot.loop.create_task
-        tasks = (task(self.play_next_song_in_queue(server_id))
-                 for server_id in self.queues)
+        tasks = [task(self.play_next_song_in_queue(server_id))
+                 for server_id in self.queues]
         while not all(t.done() for t in tasks):
             await asyncio.sleep(0.5)
 
