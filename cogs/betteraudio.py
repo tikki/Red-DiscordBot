@@ -140,7 +140,6 @@ class Muzak:
 
     @no_type_check
     @zak.group(name="next", pass_context=True, no_pm=True)
-    @checks.is_owner()
     async def command_play_next(self, ctx: commands.Context) -> None:
         """Skip a song or group"""
         if self.command_play_next is ctx.invoked_subcommand:
