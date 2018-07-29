@@ -6,6 +6,7 @@ from typing import *
 import asyncio
 import copy
 import datetime
+import itertools
 import logging
 import random
 import re
@@ -807,33 +808,73 @@ class Playlist(BasePlaylist):
         dataIO.save_json(self.path, self.settings())
 
 
-class FancyPlaylist(BasePlaylist):
+class FancyGroupCollection:
 
-    def __init__(self, groups_dir: str, group_order: str=None, group_glob: str='*',
+    def __init__(self, base_dir: str, group_order: str=None, group_glob: str='*',
                  group_pattern: str='', song_order: str=None, song_glob: str='*',
-                 song_pattern: str='', name: str=None, repeat: bool=False) -> None:
-        super().__init__(name=name)
-        self._groups: Iterable[Path] = None
+                 song_pattern: str='') -> None:
+        self.base_dir = Path(base_dir)
         self.group_order = group_order
         self.group_glob = group_glob
         self.group_pattern = re.compile(group_pattern)
-        self.groups_dir = Path(groups_dir)
         self.song_order = song_order
         self.song_glob = song_glob
         self.song_pattern = re.compile(song_pattern)
+
+    def groups(self) -> Iterable['FancyGroup']:
+        group_params = {'song_order': self.song_order, 'song_glob': self.song_glob,
+                        'song_pattern': self.song_pattern}
+        groups = (group for group in self.base_dir.glob(self.group_glob)
+                  if group.is_dir() and self.group_pattern.search(group.as_posix()))
+        rejiggered = rejigger(self.group_order)
+        yield from (FancyGroup(path=group, **group_params)
+                    for group in rejiggered(groups))
+
+
+class FancyGroup:
+
+    def __init__(self, path: Path, song_order: str=None,
+                 song_glob: str='*', song_pattern: str='') -> None:
+        self.path = path
+        self.song_order = song_order
+        self.song_glob = song_glob
+        self.song_pattern = re.compile(song_pattern)
+
+    def songs(self) -> Iterable[Song]:
+        songs = (song for song in self.path.glob(self.song_glob)
+                 if song.is_file() and self.song_pattern.search(song.as_posix()))
+        rejiggered = rejigger(self.song_order)
+        yield from (Song.from_path(song) for song in rejiggered(songs))
+
+
+class FancyPlaylist(BasePlaylist):
+
+    def __init__(self, groups: list=None, name: str=None,
+                 repeat: bool=False, shuffle: bool=False) -> None:
+        super().__init__(name=name)
+        self._groups: Iterable[FancyGroup] = None
+        self._collections = [FancyGroupCollection(**group) for group in groups]
         self.repeat = repeat
+        self.shuffle = shuffle
+
+    def _groups_from_collections(self) -> Iterable[FancyGroup]:
+        groups = itertools.chain.from_iterable(col.groups()
+                                               for col in self._collections)
+        # todo: Shuffling here overwrites group shuffle settings,
+        #       that's pretty lame. We should fix this somehow.
+        yield from (shuffled(groups) if self.shuffle else groups)
 
     def next_songs(self) -> Iterable[Song]:
         while True:
             is_fresh = False
             if self._groups is None:
-                self._groups = self._find_groups()
+                self._groups = self._groups_from_collections()
                 is_fresh = True
             for group in self._groups:
-                log.debug(f'checking group "{group!s}"')
-                for song_path in self._find_songs(group):
-                    log.debug(f'found song "{song_path!s}"')
-                    yield Song.from_path(song_path)
+                log.debug(f'checking group "{group.path!s}"')
+                for song in group.songs():
+                    log.debug(f'found song "{song.path!s}"')
+                    yield song
                 return
             else: # no more groups left
                 if not self.repeat:
@@ -855,46 +896,31 @@ class FancyPlaylist(BasePlaylist):
     def _ext() -> str:
         return '.playlist.json'
 
-    @staticmethod
-    def path(name: str) -> Path:
+    @classmethod
+    def path(Class, name: str) -> Path:
         if not name:
             raise RuntimeError('Playlist has no name.')
         # todo: sanitize playlist name
-        ext = FancyPlaylist._ext()
-        return FancyPlaylist._basepath() / f'{name}{ext}'
+        ext = Class._ext()
+        return Class._basepath() / f'{name}{ext}'
 
-    @staticmethod
-    def list() -> Iterator[str]:
-        ext = FancyPlaylist._ext()
+    @classmethod
+    def list(Class) -> Iterator[str]:
+        ext = Class._ext()
         extlen = len(ext)
         return (path.name[:-extlen] for path in
-                FancyPlaylist._basepath().glob(f'*{ext}'))
+                Class._basepath().glob(f'*{ext}'))
 
-    def settings(self) -> Dict[str, Any]:
-        return {'name': self.name, 'group_order': self.group_order,
-                'group_glob': self.group_glob, 'song_glob': self.song_glob,
-                'group_pattern': self.group_pattern,
-                'groups_dir': self.groups_dir, 'song_order': self.song_order,
-                'song_pattern': self.song_pattern, 'repeat': self.repeat}
+    # def settings(self) -> Dict[str, Any]:
+    #     return {'name': self.name, 'repeat': self.repeat}
 
-    def save(self) -> None:
-        dataIO.save_json(self.path(self.name), self.settings())
+    # def save(self) -> None:
+    #     dataIO.save_json(self.path(self.name), self.settings())
 
-    def _rejigger(self, name: str) -> Callable[[Iterable], Iterable]:
-        rejiggers = {'sort': sorted, 'shuffle': shuffled}
-        return rejiggers.get(name, lambda x: x)
 
-    def _find_groups(self) -> Iterable[Path]:
-        groups = (group for group in self.groups_dir.glob(self.group_glob)
-                  if group.is_dir() and self.group_pattern.search(group.as_posix()))
-        rejiggered = self._rejigger(self.group_order)
-        yield from rejiggered(groups)
-
-    def _find_songs(self, group: Path) -> Iterable[Path]:
-        songs = (song for song in group.glob(self.song_glob)
-                 if song.is_file() and self.song_pattern.search(song.as_posix()))
-        rejiggered = self._rejigger(self.song_order)
-        yield from rejiggered(songs)
+def rejigger(name: str) -> Callable[[Iterable], Iterable]:
+    rejiggers = {'sort': sorted, 'shuffle': shuffled}
+    return rejiggers.get(name, lambda x: x)
 
 
 def shuffled(iter: Iterable) -> Iterable:
