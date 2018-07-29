@@ -84,7 +84,6 @@ class Muzak:
 
     @no_type_check
     @zak.command(name="play", pass_context=True, no_pm=True)
-    @checks.is_owner()
     async def command_play(self, ctx: commands.Context, playlist_name: str) -> None:
         """Play a playlist"""
         server: Optional[discord.Server] = ctx.message.server
@@ -117,7 +116,21 @@ class Muzak:
             await self.say('Your voice channel is full.')
             return
 
-        self.play_playlist(server, playlist_name)
+        try:
+            self.play_playlist(server, playlist_name)
+        except FileNotFoundError:
+            await self.say('That playlist does not exist.')
+
+    @no_type_check
+    @zak.command(name="list", pass_context=True, no_pm=True)
+    async def command_list_playlists(self, ctx: commands.Context) -> None:
+        """Show all available playlists"""
+        server: Optional[discord.Server] = ctx.message.server
+        author: discord.User = ctx.message.author
+        channel: Union[discord.Channel, discord.PrivateChannel] = ctx.message.channel
+
+        names = sorted(FancyPlaylist.list())
+        await self.say(', '.join(names))
 
     @no_type_check
     @zak.command(name="now?", pass_context=True, no_pm=True)
@@ -835,11 +848,27 @@ class FancyPlaylist(BasePlaylist):
         return Class(name=name, **settings)
 
     @staticmethod
+    def _basepath() -> Path:
+        return data_path() / 'playlists'
+
+    @staticmethod
+    def _ext() -> str:
+        return '.playlist.json'
+
+    @staticmethod
     def path(name: str) -> Path:
         if not name:
             raise RuntimeError('Playlist has no name.')
         # todo: sanitize playlist name
-        return data_path() / 'playlists' / f'{name}.playlist.json'
+        ext = FancyPlaylist._ext()
+        return FancyPlaylist._basepath() / f'{name}{ext}'
+
+    @staticmethod
+    def list() -> Iterator[str]:
+        ext = FancyPlaylist._ext()
+        extlen = len(ext)
+        return (path.name[:-extlen] for path in
+                FancyPlaylist._basepath().glob(f'*{ext}'))
 
     def settings(self) -> Dict[str, Any]:
         return {'name': self.name, 'group_order': self.group_order,
